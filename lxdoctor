@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329
 set -euo pipefail
 
 if [[ "${BASH_VERSINFO[0]}" -lt 5 ]]; then
@@ -6,8 +7,16 @@ if [[ "${BASH_VERSINFO[0]}" -lt 5 ]]; then
   exit 1
 fi
 
+LXDOCTOR_VERSION=0.1.0
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-VALID_MODULES=(base network graphics audio boot dev fs)
+LXDOCTOR_NO_COLOR=false
+[[ -n "${NO_COLOR:-}" ]] && LXDOCTOR_NO_COLOR=true
+DISCOVERED_MODULES=()
+for f in "${SCRIPT_DIR}"/modules/*.sh; do
+  [[ -f "$f" ]] && DISCOVERED_MODULES+=("$(basename "$f" .sh)")
+done
+[[ ${#DISCOVERED_MODULES[@]} -gt 0 ]] && mapfile -t DISCOVERED_MODULES < <(printf '%s\n' "${DISCOVERED_MODULES[@]}" | sort)
+VALID_MODULES=("all" "${DISCOVERED_MODULES[@]}")
 LXDOCTOR_JSON_CHECKS=()
 LXDOCTOR_JSON_MODE=false
 
@@ -34,13 +43,15 @@ report() {
   local prefix
   local color=''
   local reset=''
-  case "$status" in
-    ok)   color='\033[0;32m' ;;
-    warn) color='\033[0;33m' ;;
-    fail) color='\033[0;31m' ;;
-    info) color='\033[0;36m' ;;
-  esac
-  reset='\033[0m'
+  if [[ "$LXDOCTOR_NO_COLOR" != true ]]; then
+    case "$status" in
+      ok)   color='\033[0;32m' ;;
+      warn) color='\033[0;33m' ;;
+      fail) color='\033[0;31m' ;;
+      info) color='\033[0;36m' ;;
+    esac
+    reset='\033[0m'
+  fi
   case "$status" in
     ok)   prefix="[OK]" ;;
     warn) prefix="[WARN]" ;;
@@ -67,18 +78,68 @@ info() {
   report "$1" "info" "$2"
 }
 
+check_label() {
+  local name=$1
+  local override
+  case "$name" in
+    os_release)           override="OS release" ;;
+    root_fs_usage)        override="Root FS usage" ;;
+    memory_swap)          override="Memory and swap" ;;
+    failed_units)         override="Failed units" ;;
+    journal_errors)        override="Journal errors" ;;
+    default_route)         override="Default route" ;;
+    global_ip)             override="Global IP" ;;
+    dns_resolution)        override="DNS resolution" ;;
+    icmp_test)             override="ICMP test" ;;
+    session_type)         override="Session type" ;;
+    gpu_driver)            override="GPU driver" ;;
+    nvidia_modeset)        override="NVIDIA modeset" ;;
+    default_sink)         override="Default sink" ;;
+    sample_rate)           override="Sample rate" ;;
+    boot_time)             override="Boot time" ;;
+    slowest_services)      override="Slowest services" ;;
+    broken_symlinks_usr_lib) override="Broken symlinks /usr/lib" ;;
+    disk_usage)            override="Disk usage" ;;
+    inode_exhaustion)      override="Inode usage" ;;
+    orphaned_pacman)       override="Orphaned packages" ;;
+    world_writable_etc)    override="World-writable /etc" ;;
+    *) override= ;;
+  esac
+  if [[ -n "$override" ]]; then
+    printf '%s' "$override"
+    return
+  fi
+  local label="${name//_/ }"
+  printf '%s' "${label^}"
+}
+
+has_fail_in_buffer() {
+  local sep=$'\037'
+  local i entry rest status
+  for (( i=0; i < ${#LXDOCTOR_JSON_CHECKS[@]}; i++ )); do
+    entry=${LXDOCTOR_JSON_CHECKS[i]}
+    rest="${entry#*"${sep}"}"
+    status="${rest%%"${sep}"*}"
+    [[ "$status" == "fail" ]] && return 0
+  done
+  return 1
+}
+
 usage() {
   cat <<EOF
-Usage: lxdoctor [--json] [module]
+Usage: lxdoctor [--json] [--no-color] [--version] [module]
 
-  --json    Output results as a single JSON object
-  module    One of: ${VALID_MODULES[*]} (default: base)
+  --json      Output results as a single JSON object
+  --no-color  Disable color and use text status in table
+  --version   Print version and exit
+  module      One of: ${VALID_MODULES[*]} (default: base)
 
 Run system diagnostics. With no module, runs the base module.
+Use "all" to run every module.
 EOF
 }
 
-print_json() {
+emit_json_module_object() {
   local module=$1
   local i
   local sep=$'\037'
@@ -100,7 +161,12 @@ print_json() {
     json_escape "$message"
     echo -n '"}'
   done
-  echo ']}'
+  echo -n ']}'
+}
+
+print_json() {
+  emit_json_module_object "$1"
+  echo
 }
 
 table_cell() {
@@ -129,17 +195,19 @@ print_table() {
   [[ -z "$term_cols" ]] || [[ "$term_cols" -lt 40 ]] && term_cols=80
 
   local w_check=5
-  local i entry name rest status message
+  local i entry name rest status message label
   for (( i=0; i < ${#LXDOCTOR_JSON_CHECKS[@]}; i++ )); do
     entry=${LXDOCTOR_JSON_CHECKS[i]}
     name="${entry%%"${sep}"*}"
     rest="${entry#*"${sep}"}"
     status="${rest%%"${sep}"*}"
     message="${rest#*"${sep}"}"
-    [[ ${#name} -gt "$w_check" ]] && w_check=${#name}
+    label=$(check_label "$name")
+    [[ ${#label} -gt "$w_check" ]] && w_check=${#label}
   done
 
   local w_status=2
+  [[ "$LXDOCTOR_NO_COLOR" == true ]] && w_status=6
   local total_fixed=$((4 + w_check + w_status))
   local w_message=$((term_cols - total_fixed))
   [[ "$w_message" -lt 10 ]] && w_message=10
@@ -183,17 +251,28 @@ print_table() {
     rest="${entry#*"${sep}"}"
     status="${rest%%"${sep}"*}"
     message="${rest#*"${sep}"}"
-    case "$status" in
-      ok)   sym='✓'; [[ -t 1 ]] && color='\033[0;32m' ;;
-      warn) sym='⚠'; [[ -t 1 ]] && color='\033[0;33m' ;;
-      fail) sym='✗'; [[ -t 1 ]] && color='\033[0;31m' ;;
-      info) sym='ℹ'; [[ -t 1 ]] && color='\033[0;36m' ;;
-      *)    sym='?'; color= ;;
-    esac
+    if [[ "$LXDOCTOR_NO_COLOR" == true ]]; then
+      case "$status" in
+        ok)   sym='[OK]' ;;
+        warn) sym='[WARN]' ;;
+        fail) sym='[FAIL]' ;;
+        info) sym='[INFO]' ;;
+        *)    sym='[???]' ;;
+      esac
+      color=
+    else
+      case "$status" in
+        ok)   sym='✓'; [[ -t 1 ]] && color='\033[0;32m' ;;
+        warn) sym='⚠'; [[ -t 1 ]] && color='\033[0;33m' ;;
+        fail) sym='✗'; [[ -t 1 ]] && color='\033[0;31m' ;;
+        info) sym='ℹ'; [[ -t 1 ]] && color='\033[0;36m' ;;
+        *)    sym='?'; color= ;;
+      esac
+    fi
     printf '│'
-    table_cell "$name" "$w_check" false
+    table_cell "$(check_label "$name")" "$w_check" false
     printf '│'
-    if [[ -t 1 ]] && [[ -n "$color" ]]; then
+    if [[ "$LXDOCTOR_NO_COLOR" != true ]] && [[ -t 1 ]] && [[ -n "$color" ]]; then
       printf '%b%s%b' "$color" "$sym" "$reset"
       printf '%*s' "$((w_status - ${#sym}))" ''
     else
@@ -238,6 +317,14 @@ main() {
         LXDOCTOR_JSON_MODE=true
         shift
         ;;
+      --no-color)
+        LXDOCTOR_NO_COLOR=true
+        shift
+        ;;
+      --version)
+        echo "lxdoctor ${LXDOCTOR_VERSION}"
+        exit 0
+        ;;
       -h|--help)
         usage
         exit 0
@@ -272,6 +359,34 @@ main() {
     exit 1
   fi
 
+  local exit_code=0
+
+  if [[ "$module" == "all" ]]; then
+    local m first=yes
+    if [[ "$LXDOCTOR_JSON_MODE" == true ]]; then
+      echo -n '{"run":"all","modules":['
+      for m in "${DISCOVERED_MODULES[@]}"; do
+        LXDOCTOR_JSON_CHECKS=()
+        run_module "$m"
+        [[ "$first" == yes ]] || printf ','
+        emit_json_module_object "$m"
+        first=no
+        has_fail_in_buffer && exit_code=1
+      done
+      echo ']}'
+    else
+      for m in "${DISCOVERED_MODULES[@]}"; do
+        LXDOCTOR_JSON_CHECKS=()
+        run_module "$m"
+        if [[ -t 1 ]]; then
+          print_table "$m"
+        fi
+        has_fail_in_buffer && exit_code=1
+      done
+    fi
+    exit "$exit_code"
+  fi
+
   LXDOCTOR_JSON_CHECKS=()
   run_module "$module"
 
@@ -280,6 +395,8 @@ main() {
   elif [[ -t 1 ]]; then
     print_table "$module"
   fi
+  has_fail_in_buffer && exit_code=1
+  exit "$exit_code"
 }
 
 main "$@"
