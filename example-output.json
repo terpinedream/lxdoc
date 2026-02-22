@@ -1,0 +1,12 @@
+{
+  "module": "base",
+  "checks": [
+    { "name": "kernel", "status": "ok", "message": "6.5.0-arch1-1" },
+    { "name": "os_release", "status": "ok", "message": "Arch Linux" },
+    { "name": "uptime", "status": "ok", "message": "2d 5h 12m" },
+    { "name": "root_fs_usage", "status": "ok", "message": "root filesystem 45% used" },
+    { "name": "memory_swap", "status": "ok", "message": "Mem: 16384Mi total, 8192Mi available; Swap: 2048Mi total, 2048Mi free" },
+    { "name": "failed_units", "status": "ok", "message": "no failed systemd units" },
+    { "name": "journal_errors", "status": "ok", "message": "no priority 3 journal entries this boot" }
+  ]
+}

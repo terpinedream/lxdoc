@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${BASH_VERSINFO[0]}" -lt 5 ]]; then
+  echo "lxdoctor requires Bash 5 or later" >&2
+  exit 1
+fi
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+VALID_MODULES=(base network graphics audio boot dev fs)
+LXDOCTOR_JSON_CHECKS=()
+LXDOCTOR_JSON_MODE=false
+
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+report() {
+  local name=$1 status=$2 message=$3
+  if [[ "$LXDOCTOR_JSON_MODE" == true ]]; then
+    LXDOCTOR_JSON_CHECKS+=("${name}"$'\037'"${status}"$'\037'"${message}")
+    return
+  fi
+  if [[ -t 1 ]]; then
+    LXDOCTOR_JSON_CHECKS+=("${name}"$'\037'"${status}"$'\037'"${message}")
+    return
+  fi
+  local prefix
+  local color=''
+  local reset=''
+  case "$status" in
+    ok)   color='\033[0;32m' ;;
+    warn) color='\033[0;33m' ;;
+    fail) color='\033[0;31m' ;;
+    info) color='\033[0;36m' ;;
+  esac
+  reset='\033[0m'
+  case "$status" in
+    ok)   prefix="[OK]" ;;
+    warn) prefix="[WARN]" ;;
+    fail) prefix="[FAIL]" ;;
+    info) prefix="[INFO]" ;;
+    *)    prefix="[???]" ;;
+  esac
+  printf '%b%s%b %s\n' "$color" "$prefix" "$reset" "$message"
+}
+
+ok() {
+  report "$1" "ok" "$2"
+}
+
+warn() {
+  report "$1" "warn" "$2"
+}
+
+fail() {
+  report "$1" "fail" "$2"
+}
+
+info() {
+  report "$1" "info" "$2"
+}
+
+usage() {
+  cat <<EOF
+Usage: lxdoctor [--json] [module]
+
+  --json    Output results as a single JSON object
+  module    One of: ${VALID_MODULES[*]} (default: base)
+
+Run system diagnostics. With no module, runs the base module.
+EOF
+}
+
+print_json() {
+  local module=$1
+  local i
+  local sep=$'\037'
+  echo -n '{"module":"'
+  json_escape "$module"
+  echo -n '","checks":['
+  for (( i=0; i < ${#LXDOCTOR_JSON_CHECKS[@]}; i++ )); do
+    local entry=${LXDOCTOR_JSON_CHECKS[i]}
+    local name="${entry%%"${sep}"*}"
+    local rest="${entry#*"${sep}"}"
+    local status="${rest%%"${sep}"*}"
+    local message="${rest#*"${sep}"}"
+    [[ $i -gt 0 ]] && echo -n ','
+    echo -n '{"name":"'
+    json_escape "$name"
+    echo -n '","status":"'
+    json_escape "$status"
+    echo -n '","message":"'
+    json_escape "$message"
+    echo -n '"}'
+  done
+  echo ']}'
+}
+
+table_cell() {
+  local str=$1
+  local w=$2
+  local trunc=$3
+  local len=${#str}
+  if [[ "$len" -le "$w" ]]; then
+    printf '%-*s' "$w" "$str"
+  elif [[ "$trunc" == true ]]; then
+    if [[ $w -gt 1 ]]; then
+      printf '%.*s…' "$((w - 1))" "$str"
+    else
+      printf '%.*s' "$w" "$str"
+    fi
+  else
+    printf '%-*s' "$w" "$str"
+  fi
+}
+
+print_table() {
+  local module=$1
+  local sep=$'\037'
+  local term_cols
+  term_cols=$(tput cols 2>/dev/null) || term_cols=${COLUMNS:-80}
+  [[ -z "$term_cols" ]] || [[ "$term_cols" -lt 40 ]] && term_cols=80
+
+  local w_check=5
+  local i entry name rest status message
+  for (( i=0; i < ${#LXDOCTOR_JSON_CHECKS[@]}; i++ )); do
+    entry=${LXDOCTOR_JSON_CHECKS[i]}
+    name="${entry%%"${sep}"*}"
+    rest="${entry#*"${sep}"}"
+    status="${rest%%"${sep}"*}"
+    message="${rest#*"${sep}"}"
+    [[ ${#name} -gt "$w_check" ]] && w_check=${#name}
+  done
+
+  local w_status=2
+  local total_fixed=$((4 + w_check + w_status))
+  local w_message=$((term_cols - total_fixed))
+  [[ "$w_message" -lt 10 ]] && w_message=10
+
+  printf 'Module: %s\n' "$module"
+
+  repeat_char() {
+    local ch=$1 n=$2 j
+    for (( j=0; j < n; j++ )); do printf '%s' "$ch"; done
+  }
+
+  printf '┌'
+  repeat_char '─' "$w_check"
+  printf '┬'
+  repeat_char '─' "$w_status"
+  printf '┬'
+  repeat_char '─' "$w_message"
+  printf '┐\n'
+
+  printf '│'
+  table_cell "Check" "$w_check" false
+  printf '│'
+  table_cell " " "$w_status" false
+  printf '│'
+  table_cell "Message" "$w_message" false
+  printf '│\n'
+
+  printf '├'
+  repeat_char '─' "$w_check"
+  printf '┼'
+  repeat_char '─' "$w_status"
+  printf '┼'
+  repeat_char '─' "$w_message"
+  printf '┤\n'
+
+  local sym
+  local color='' reset='\033[0m'
+  for (( i=0; i < ${#LXDOCTOR_JSON_CHECKS[@]}; i++ )); do
+    entry=${LXDOCTOR_JSON_CHECKS[i]}
+    name="${entry%%"${sep}"*}"
+    rest="${entry#*"${sep}"}"
+    status="${rest%%"${sep}"*}"
+    message="${rest#*"${sep}"}"
+    case "$status" in
+      ok)   sym='✓'; [[ -t 1 ]] && color='\033[0;32m' ;;
+      warn) sym='⚠'; [[ -t 1 ]] && color='\033[0;33m' ;;
+      fail) sym='✗'; [[ -t 1 ]] && color='\033[0;31m' ;;
+      info) sym='ℹ'; [[ -t 1 ]] && color='\033[0;36m' ;;
+      *)    sym='?'; color= ;;
+    esac
+    printf '│'
+    table_cell "$name" "$w_check" false
+    printf '│'
+    if [[ -t 1 ]] && [[ -n "$color" ]]; then
+      printf '%b%s%b' "$color" "$sym" "$reset"
+      printf '%*s' "$((w_status - ${#sym}))" ''
+    else
+      table_cell "$sym" "$w_status" false
+    fi
+    printf '│'
+    table_cell "$message" "$w_message" true
+    printf '│\n'
+  done
+
+  printf '└'
+  repeat_char '─' "$w_check"
+  printf '┴'
+  repeat_char '─' "$w_status"
+  printf '┴'
+  repeat_char '─' "$w_message"
+  printf '┘\n'
+}
+
+run_module() {
+  local module=$1
+  local module_path="${SCRIPT_DIR}/modules/${module}.sh"
+  if [[ ! -f "$module_path" ]]; then
+    echo "lxdoctor: module not found: ${module}" >&2
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  source "$module_path"
+  local run_fn="run_${module}"
+  if ! declare -f "$run_fn" &>/dev/null; then
+    echo "lxdoctor: module does not define ${run_fn}" >&2
+    return 1
+  fi
+  "$run_fn"
+}
+
+main() {
+  local module=base
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)
+        LXDOCTOR_JSON_MODE=true
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -*)
+        echo "lxdoctor: unknown option: $1" >&2
+        usage >&2
+        exit 1
+        ;;
+      *)
+        if [[ -n "${module_set:-}" ]]; then
+          echo "lxdoctor: unexpected argument: $1" >&2
+          exit 1
+        fi
+        module=$1
+        module_set=1
+        shift
+        ;;
+    esac
+  done
+
+  local valid=false
+  for m in "${VALID_MODULES[@]}"; do
+    if [[ "$module" == "$m" ]]; then
+      valid=true
+      break
+    fi
+  done
+  if [[ "$valid" != true ]]; then
+    echo "lxdoctor: unknown module: ${module}" >&2
+    echo "Valid modules: ${VALID_MODULES[*]}" >&2
+    exit 1
+  fi
+
+  LXDOCTOR_JSON_CHECKS=()
+  run_module "$module"
+
+  if [[ "$LXDOCTOR_JSON_MODE" == true ]]; then
+    print_json "$module"
+  elif [[ -t 1 ]]; then
+    print_table "$module"
+  fi
+}
+
+main "$@"
