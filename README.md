@@ -10,13 +10,14 @@ System diagnostics CLI for systemd-based Linux systems with optional PipeWire su
 ## Usage
 
 ```text
-lxdoctor [--json] [--no-color] [--version] [module]
+lxdoctor [--json] [--no-color] [--version] [--report] [module]
 ```
 
 - With no arguments, runs the **base** module.
 - **--json** — output a single JSON object (no color). Use `all` as module to get one object with every module's checks.
 - **--no-color** — disable color and use text status (`[OK]` / `[WARN]` etc.) in the table. Respects the `NO_COLOR` environment variable when set.
 - **--version** — print version and exit.
+- **--report** — run all modules and print a **detailed issues report** (warnings and failures only), grouped by module. Useful for spotting common or recent problems quickly. Exit code is 1 if any failure occurred.
 - **module** — one of: **all**, base, network, graphics, audio, boot, dev, fs (default: base). Use **all** to run every module.
 
 ## Modules

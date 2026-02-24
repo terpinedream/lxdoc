@@ -19,6 +19,7 @@ done
 VALID_MODULES=("all" "${DISCOVERED_MODULES[@]}")
 LXDOCTOR_JSON_CHECKS=()
 LXDOCTOR_JSON_MODE=false
+LXDOCTOR_REPORT_MODE=false
 
 json_escape() {
   local s=$1
@@ -33,6 +34,10 @@ json_escape() {
 report() {
   local name=$1 status=$2 message=$3
   if [[ "$LXDOCTOR_JSON_MODE" == true ]]; then
+    LXDOCTOR_JSON_CHECKS+=("${name}"$'\037'"${status}"$'\037'"${message}")
+    return
+  fi
+  if [[ "$LXDOCTOR_REPORT_MODE" == true ]]; then
     LXDOCTOR_JSON_CHECKS+=("${name}"$'\037'"${status}"$'\037'"${message}")
     return
   fi
@@ -95,6 +100,8 @@ check_label() {
     gpu_driver)            override="GPU driver" ;;
     nvidia_modeset)        override="NVIDIA modeset" ;;
     default_sink)         override="Default sink" ;;
+    pipewire)             override="PipeWire" ;;
+    wireplumber)          override="WirePlumber" ;;
     sample_rate)           override="Sample rate" ;;
     boot_time)             override="Boot time" ;;
     slowest_services)      override="Slowest services" ;;
@@ -125,17 +132,53 @@ has_fail_in_buffer() {
   return 1
 }
 
+print_issues_report_section() {
+  local module=$1
+  local sep=$'\037'
+  local i entry name rest status message label
+  local count=0
+  for (( i=0; i < ${#LXDOCTOR_JSON_CHECKS[@]}; i++ )); do
+    entry=${LXDOCTOR_JSON_CHECKS[i]}
+    name="${entry%%"${sep}"*}"
+    rest="${entry#*"${sep}"}"
+    status="${rest%%"${sep}"*}"
+    message="${rest#*"${sep}"}"
+    [[ "$status" != "warn" ]] && [[ "$status" != "fail" ]] && continue
+    [[ $count -eq 0 ]] && printf '\nModule: %s\n' "$module"
+    count=$((count + 1))
+    label=$(check_label "$name")
+    if [[ "$status" == "fail" ]]; then
+      if [[ "$LXDOCTOR_NO_COLOR" != true ]] && [[ -t 1 ]]; then
+        printf '  \033[0;31m[FAIL]\033[0m %s: %s\n' "$label" "$message"
+      else
+        printf '  [FAIL] %s: %s\n' "$label" "$message"
+      fi
+    else
+      if [[ "$LXDOCTOR_NO_COLOR" != true ]] && [[ -t 1 ]]; then
+        printf '  \033[0;33m[WARN]\033[0m %s: %s\n' "$label" "$message"
+      else
+        printf '  [WARN] %s: %s\n' "$label" "$message"
+      fi
+    fi
+  done
+  if [[ $count -eq 0 ]]; then
+    printf '\nModule: %s\n' "$module"
+    printf '  No issues.\n'
+  fi
+}
+
 usage() {
   cat <<EOF
-Usage: lxdoctor [--json] [--no-color] [--version] [module]
+Usage: lxdoctor [--json] [--no-color] [--version] [--report] [module]
 
   --json      Output results as a single JSON object
   --no-color  Disable color and use text status in table
   --version   Print version and exit
+  --report    Run all modules and print a detailed report of issues (warnings and failures) only
   module      One of: ${VALID_MODULES[*]} (default: base)
 
 Run system diagnostics. With no module, runs the base module.
-Use "all" to run every module.
+Use "all" to run every module. Use --report for an issues-only report across all modules.
 EOF
 }
 
@@ -325,6 +368,10 @@ main() {
         echo "lxdoctor ${LXDOCTOR_VERSION}"
         exit 0
         ;;
+      --report)
+        LXDOCTOR_REPORT_MODE=true
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -360,6 +407,20 @@ main() {
   fi
 
   local exit_code=0
+
+  if [[ "$LXDOCTOR_REPORT_MODE" == true ]]; then
+    printf 'lxdoctor issues report\n'
+    printf 'Generated: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    local m
+    for m in "${DISCOVERED_MODULES[@]}"; do
+      LXDOCTOR_JSON_CHECKS=()
+      run_module "$m"
+      print_issues_report_section "$m"
+      has_fail_in_buffer && exit_code=1
+    done
+    printf '\n'
+    exit "$exit_code"
+  fi
 
   if [[ "$module" == "all" ]]; then
     local m first=yes
